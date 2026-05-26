@@ -1,19 +1,5 @@
-"""Step 2 — Inspect data, write backprop, train, save weights.
+"""Step 2 — Inspect data, train, and save weights.
 
-Run:  python 02_train.py --data data_v1.npz --tag v1
-
-It loads the dataset from `--data`, saves diagnostic figures, runs the
-gradient check on YOUR `my_backward()`, trains for 300 epochs (Adam,
-batch 64, lr 1e-3, 90/10 train/val), and saves nav_<tag>.npz.
-
-The function `my_backward` near the top is yours to fill in. The script
-asserts that your gradients agree with numerical_gradient before it lets
-training start. If the assertion fires, fix the bug.
-
-This script is the baseline. Once you've passed the gradient check and got
-your first benchmark, the iteration loop is yours: change the architecture
-in `drive2win/nn.py`, change the data, change the training
-schedule, retrain, rebenchmark, commit, repeat.
 """
 from __future__ import annotations
 import argparse
@@ -27,35 +13,60 @@ from drive2win.normalize import (
 
 
 # =========================================================================
-# TODO — write backward()
-# =========================================================================
-# Walk the chain rule outward from the loss:
-#   y = tanh(z3),  loss = MSE(y, target)
-#   z3 = a2 W3 + b3,   a2 = ReLU(z2)
-#   z2 = a1 W2 + b2,   a1 = ReLU(z1)
-#   z1 = x  W1 + b1
-#
-# Replace each `...` with the correct expression.
+# Backpropagation for: 12 -> H1 -> H2 -> 2, ReLU/ReLU/tanh, MSE loss
 # =========================================================================
 def my_backward(x, y_target, w, cache):
+    """Return gradients dW1, db1, ..., dW3, db3 for one mini-batch.
+
+    x:        (N, 12) normalized input features
+    y_target: (N, 2) target actions: throttle, steering
+    w:        dict of model weights
+    cache:    output from nn_mod.forward_all(x, w)
+    """
     n = x.shape[0]
     y = cache["y"]
-    # --- output ---
-    dy  = ...   # 2 * (y - y_target) / (n * y.shape[1])
-    dz3 = ...   # tanh derivative: dy * (1 - y * y)
-    dW3 = ...   # cache["a2"].T @ dz3
-    db3 = ...   # dz3.sum(axis=0)
-    # --- hidden 2 ---
-    da2 = ...   # dz3 @ w["W3"].T
-    dz2 = ...   # ReLU mask: da2 * (cache["z2"] > 0)
-    dW2 = ...   # cache["a1"].T @ dz2
-    db2 = ...
-    # --- hidden 1 ---
-    da1 = ...
-    dz1 = ...
-    dW1 = ...   # x.T @ dz1
-    db1 = ...
+
+    # Loss: mean((y - y_target)^2)
+    dy = 2.0 * (y - y_target) / (n * y.shape[1])
+
+    # Output layer: y = tanh(z3)
+    dz3 = dy * (1.0 - y * y)
+    dW3 = cache["a2"].T @ dz3
+    db3 = dz3.sum(axis=0)
+
+    # Hidden layer 2: a2 = ReLU(z2)
+    da2 = dz3 @ w["W3"].T
+    dz2 = da2 * (cache["z2"] > 0)
+    dW2 = cache["a1"].T @ dz2
+    db2 = dz2.sum(axis=0)
+
+    # Hidden layer 1: a1 = ReLU(z1)
+    da1 = dz2 @ w["W2"].T
+    dz1 = da1 * (cache["z1"] > 0)
+    dW1 = x.T @ dz1
+    db1 = dz1.sum(axis=0)
+
     return {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2, "W3": dW3, "b3": db3}
+
+
+def numerical_gradient64(x: np.ndarray, y_target: np.ndarray, w: dict,
+                         key: str, idx: tuple, h: float = 1e-5) -> float:
+    """Accurate finite-difference gradient for the gradient check.
+
+    The starter nn_mod.numerical_gradient mutates float32 weights. With small
+    h values, float32 roundoff can make a correct backprop look wrong. This
+    helper copies the tiny check problem to float64, so the check tests the
+    math rather than float32 precision.
+    """
+    w64 = {k: v.astype(np.float64).copy() for k, v in w.items()}
+    x64 = x.astype(np.float64)
+    y64 = y_target.astype(np.float64)
+
+    w64[key][idx] += h
+    loss_p = nn_mod.mse_loss(nn_mod.forward(x64, w64), y64)
+    w64[key][idx] -= 2 * h
+    loss_m = nn_mod.mse_loss(nn_mod.forward(x64, w64), y64)
+    return (loss_p - loss_m) / (2 * h)
 
 
 def gradient_check():
@@ -72,7 +83,7 @@ def gradient_check():
         flat = w[key].size
         for _ in range(5):
             idx = np.unravel_index(rng.integers(0, flat), w[key].shape)
-            num = nn_mod.numerical_gradient(x, y, w, key, idx)
+            num = numerical_gradient64(x, y, w, key, idx)
             ana = grads[key][idx]
             denom = max(1e-12, abs(num) + abs(ana))
             max_err = max(max_err, abs(num - ana) / denom)
@@ -94,34 +105,65 @@ def inspect_dataset(states_raw, actions, tag: str):
     viz.plot_heading_vs_steering(states_raw, actions, out=f"fig_heading_{tag}.png")
 
 
-def train(X, Y, epochs=300, lr=1e-3, batch_size=64, val_frac=0.1, seed=0):
+def make_split(X, Y, val_frac: float, seed: int, split: str):
+    """Create train/validation split.
+
+    block split is recommended for driving data because neighboring frames are
+    very similar. random split is kept for comparison with the starter code.
+    """
     rng = np.random.default_rng(seed)
     N = len(X)
-    perm = rng.permutation(N); n_val = max(1, int(N * val_frac))
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
-    Xtr, Ytr, Xva, Yva = X[tr_idx], Y[tr_idx], X[val_idx], Y[val_idx]
+    n_val = max(1, int(N * val_frac))
+
+    if split == "random":
+        perm = rng.permutation(N)
+        val_idx, tr_idx = perm[:n_val], perm[n_val:]
+        return X[tr_idx], Y[tr_idx], X[val_idx], Y[val_idx]
+
+    if split == "block":
+        return X[:-n_val], Y[:-n_val], X[-n_val:], Y[-n_val:]
+
+    raise ValueError(f"Unknown split: {split}")
+
+
+def train(X, Y, epochs=300, lr=1e-3, batch_size=64, val_frac=0.1,
+          seed=0, split="block"):
+    rng = np.random.default_rng(seed)
+    Xtr, Ytr, Xva, Yva = make_split(X, Y, val_frac=val_frac, seed=seed, split=split)
+    print(f"\nsplit     : {split}")
+    print(f"train size: {len(Xtr)}")
+    print(f"val size  : {len(Xva)}")
 
     w = nn_mod.init_weights(seed=seed)
     state = nn_mod.init_adam(w)
     train_losses, val_losses = [], []
-    best_val = float("inf"); best = {k: v.copy() for k, v in w.items()}
+    best_val = float("inf")
+    best = {k: v.copy() for k, v in w.items()}
 
     for epoch in range(epochs):
         idx = rng.permutation(len(Xtr))
         Xs, Ys = Xtr[idx], Ytr[idx]
         ep_loss, n_b = 0.0, 0
+
         for i in range(0, len(Xs), batch_size):
-            xb, yb = Xs[i:i+batch_size], Ys[i:i+batch_size]
+            xb, yb = Xs[i:i + batch_size], Ys[i:i + batch_size]
             cache = nn_mod.forward_all(xb, w)
-            ep_loss += nn_mod.mse_loss(cache["y"], yb); n_b += 1
+            ep_loss += nn_mod.mse_loss(cache["y"], yb)
+            n_b += 1
             grads = my_backward(xb, yb, w, cache)
             nn_mod.adam_step(w, grads, state, lr=lr)
-        v = nn_mod.mse_loss(nn_mod.forward(Xva, w), Yva)
-        train_losses.append(ep_loss / max(1, n_b)); val_losses.append(v)
-        if v < best_val:
-            best_val = v; best = {k: w[k].copy() for k in w}
+
+        val_loss = nn_mod.mse_loss(nn_mod.forward(Xva, w), Yva)
+        train_losses.append(ep_loss / max(1, n_b))
+        val_losses.append(val_loss)
+
+        if val_loss < best_val:
+            best_val = val_loss
+            best = {k: w[k].copy() for k in w}
+
         if epoch % 25 == 0 or epoch == epochs - 1:
-            print(f"epoch {epoch:3d}  train={train_losses[-1]:.4f}  val={v:.4f}  best={best_val:.4f}")
+            print(f"epoch {epoch:3d}  train={train_losses[-1]:.4f}  "
+                  f"val={val_loss:.4f}  best={best_val:.4f}")
 
     return best, train_losses, val_losses
 
@@ -135,6 +177,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--split", choices=["block", "random"], default="block",
+                    help="Validation split. block is recommended for sequential driving data.")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="Training RNG seed")
     args = ap.parse_args()
 
     d = np.load(args.data, allow_pickle=False)
@@ -152,7 +198,13 @@ def main():
     gradient_check()
 
     weights, tr_losses, va_losses = train(
-        X, Y, epochs=args.epochs, lr=args.lr, batch_size=args.batch)
+        X, Y,
+        epochs=args.epochs,
+        lr=args.lr,
+        batch_size=args.batch,
+        seed=args.seed,
+        split=args.split,
+    )
 
     viz.plot_loss_curves(tr_losses, va_losses, out=f"fig_loss_{args.tag}.png")
     nn_mod.save(weights, f"nav_{args.tag}.npz")
