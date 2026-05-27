@@ -1,7 +1,5 @@
 """MLP policy — steering-only, stuck recovery, checkpoint homing + orbit escape.
-
-Usage:
-    python 03_benchmark.py --tag v13 --weights nav_v13.npz --module drive2win.homing_policy
+v14: longer reverse (2 seconds) + obstacle avoidance during reverse (turn toward open space).
 """
 from __future__ import annotations
 from pathlib import Path
@@ -12,7 +10,7 @@ from drive2win.normalize import sensors_to_input
 THROTTLE         = 0.9
 STEER_GAIN       = 1.4
 STUCK_THRESHOLD  = 15
-REVERSE_FRAMES   = 10
+REVERSE_FRAMES   = 40      # 2 seconds at 20Hz
 STUCK_SPEED      = 0.3
 RAY_WEDGE        = 4.0
 PURE_STUCK_THR   = 50
@@ -92,11 +90,28 @@ def make_policy(weights_path: str):
             reverse_count = REVERSE_FRAMES * 2
             orbit_frames = 0
 
+        # --- REVERSE WITH OBSTACLE AVOIDANCE ---
         if reverse_count > 0:
             reverse_count -= 1
-            steer = -0.8 if right < left else 0.8
+            
+            # Phase 1 (first 1 second / 20 frames): reverse straight
+            if reverse_count > 20:
+                steer = 0.0
+            # Phase 2 (remaining time): turn toward open space
+            else:
+                # Use ray distances to determine which side has more space
+                # left ray index 6, right ray index 2
+                if left > right:
+                    steer = 0.9   # turn left
+                else:
+                    steer = -0.9  # turn right
+            
+            # If front is clear and we've been reversing for a while, stop early
+            if front > 8.0 and reverse_count < 30:
+                reverse_count = 0
+            
             prev = np.array([steer], dtype=np.float32)
-            return (-1.0, steer)
+            return (-0.8, steer)
 
         path_feat = None
         if use_path:
