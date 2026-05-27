@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 H1, H2 = 128, 64
-N_IN, N_OUT = 9, 1
+N_IN, N_OUT = 12, 1
 
 
 def forward(x: np.ndarray, w: dict) -> np.ndarray:
@@ -75,7 +75,7 @@ def adam_step(w: dict, grads: dict, state: dict, lr: float = 1e-3) -> None:
 def init_weights(seed: int = 0) -> dict:
     rng = np.random.default_rng(seed)
     return {
-        "W1": rng.normal(0, np.sqrt(2 / N_IN), (N_IN, H1)).astype(np.float32),
+        "W1": rng.normal(0, np.sqrt(2 / 12), (12, H1)).astype(np.float32),
         "b1": np.zeros(H1, dtype=np.float32),
         "W2": rng.normal(0, np.sqrt(2 / H1), (H1, H2)).astype(np.float32),
         "b2": np.zeros(H2, dtype=np.float32),

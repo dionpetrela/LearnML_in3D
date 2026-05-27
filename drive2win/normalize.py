@@ -1,85 +1,78 @@
 """Input/output normalization for the navigation network.
 
-The simulation returns sensor values in their natural units (m/s, radians,
-meters, [0,1] friction). Neural networks train and infer better when every
-input is in roughly the same range. The functions in this file are the
-*single source of truth* for normalization across the whole project.
-
-If you ever change a normalization constant, retrain. Mixing training-time
-and deployment-time normalization is the #1 reason "my net trained fine but
-won't drive."
+Feature engineering (v13):
+  - Dropped: ray_3_+135, ray_4_back, ray_5_-135 (rear rays)
+  - Kept: ground_friction
+  - Added: path_dir_x, path_dir_z, path_dist — direction/distance to
+    a future point on the reference path (lookahead ~17 m)
+  - Output: steering only (throttle hardcoded in policy)
 """
 from __future__ import annotations
 import numpy as np
 
-# ── Constants ────────────────────────────────────────────────────────────
-SPD_MAX = 20.0      # speed clip (m/s)
-DIST_MAX = 100.0    # checkpoint-distance clip (m)
-RAY_MAX = 50.0      # raycast clip (m); matches RAYCAST_MAX_RANGE in SensorSystem.ts
+SPD_MAX      = 20.0
+DIST_MAX     = 100.0
+RAY_MAX      = 50.0
+FRIC_MAX     = 1.5
+PATH_DIR_MAX = 50.0
+PATH_DIST_MAX = 50.0
+
+KEEP_COLS = [0, 1, 2, 3, 4, 5, 9, 10, 11]
 
 FEATURE_NAMES = [
-    "speed",
-    "heading_error",
-    "checkpoint_distance",
-    "ray_0_front",
-    "ray_1_+45",
-    "ray_2_+90",
-    "ray_3_+135",
-    "ray_4_back",
-    "ray_5_-135",
-    "ray_6_-90",
-    "ray_7_-45",
+    "speed", "heading_error", "checkpoint_distance",
+    "ray_0_front", "ray_1_+45", "ray_2_+90", "ray_6_-90", "ray_7_-45",
     "ground_friction",
+    "path_dir_x", "path_dir_z", "path_dist",
 ]
 ACTION_NAMES = ["steering"]
-N_FEATURES = 12
-N_ACTIONS = 1
+N_FEATURES = 9
+N_ACTIONS  = 1
 
 
 def normalize_states(states_raw: np.ndarray) -> np.ndarray:
-    """Map raw sensor readings into roughly [-1, 1].
-
-    Args:
-        states_raw: shape (N, 12). Columns in FEATURE_NAMES order.
-
-    Returns:
-        float32 array of the same shape, scaled to [-1, 1] (or [0, 1] for
-        ranges that are physically non-negative).
-    """
-    s = np.asarray(states_raw, dtype=np.float32).copy()
-    s[:, 0] = np.clip(s[:, 0] / SPD_MAX, -1.0, 1.0)         # speed
-    s[:, 1] = np.clip(s[:, 1] / np.pi, -1.0, 1.0)           # heading_error
-    s[:, 2] = np.clip(s[:, 2] / DIST_MAX, 0.0, 1.0)         # ckpt distance
-    s[:, 3:11] = np.clip(s[:, 3:11] / RAY_MAX, 0.0, 1.0)    # 8 rays
-    # column 11 (friction) is already in [0, 1]
+    s = np.asarray(states_raw, dtype=np.float32)[:, KEEP_COLS].copy()
+    s[:, 0] = np.clip(s[:, 0] / SPD_MAX,     -1.0, 1.0)
+    s[:, 1] = np.clip(s[:, 1] / np.pi,       -1.0, 1.0)
+    s[:, 2] = np.clip(s[:, 2] / DIST_MAX,     0.0, 1.0)
+    s[:, 3:8] = np.clip(s[:, 3:8] / RAY_MAX,  0.0, 1.0)
+    s[:, 8] = np.clip(s[:, 8] / FRIC_MAX,     0.0, 1.0)
     return s
 
 
-def sensors_to_input(sensors: dict) -> np.ndarray:
-    """Convert a live sensor dict (from `client.get_sensors()` or the WS
-    `state['sensors']`) to the normalized 12-vector the network expects.
-
-    Returns shape (12,), float32.
-    """
-    raw = np.array(
-        [
-            sensors["speed"],
-            sensors["heading_error"],
-            sensors["checkpoint_distance"],
-            *sensors["rays"],
-            sensors["ground_friction"],
-        ],
-        dtype=np.float32,
-    )
-    return normalize_states(raw[None, :])[0]
+def normalize_path_features(path_feats: np.ndarray) -> np.ndarray:
+    p = np.asarray(path_feats, dtype=np.float32).copy()
+    single = p.ndim == 1
+    if single:
+        p = p[None, :]
+    p[:, 0] = np.clip(p[:, 0] / PATH_DIR_MAX,  -1.0, 1.0)
+    p[:, 1] = np.clip(p[:, 1] / PATH_DIR_MAX,  -1.0, 1.0)
+    p[:, 2] = np.clip(p[:, 2] / PATH_DIST_MAX,  0.0, 1.0)
+    return p[0] if single else p
 
 
-def clip_action(a: np.ndarray) -> tuple[float, float]:
-    """Clamp the network's (throttle, steering) output to the physical [-1, 1]
-    range the controller accepts. tanh outputs are already in range, but this
-    keeps you safe if you ever swap the output activation.
-    """
+def sensors_to_input(sensors: dict, path_feat: np.ndarray | None = None) -> np.ndarray:
+    rays = sensors["rays"]
+    raw = np.array([
+        sensors["speed"],
+        sensors["heading_error"],
+        sensors["checkpoint_distance"],
+        rays[0], rays[1], rays[2], rays[6], rays[7],
+        sensors.get("ground_friction", 1.0),
+    ], dtype=np.float32)
+    out = raw.copy()
+    out[0] = np.clip(raw[0] / SPD_MAX,   -1.0, 1.0)
+    out[1] = np.clip(raw[1] / np.pi,     -1.0, 1.0)
+    out[2] = np.clip(raw[2] / DIST_MAX,   0.0, 1.0)
+    out[3:8] = np.clip(raw[3:8] / RAY_MAX, 0.0, 1.0)
+    out[8] = np.clip(raw[8] / FRIC_MAX,   0.0, 1.0)
+    if path_feat is not None:
+        out = np.concatenate([out, normalize_path_features(path_feat)])
+    return out
+
+
+def clip_action(a: np.ndarray, default_throttle: float = 0.9) -> tuple[float, float]:
     a = np.asarray(a, dtype=np.float32).reshape(-1)
-    throttle = float(np.clip(a[0], -1.0, 1.0))
-    steering = float(np.clip(a[1], -1.0, 1.0))
-    return throttle, steering
+    if len(a) == 1:
+        return default_throttle, float(np.clip(a[0], -1.0, 1.0))
+    return float(np.clip(a[0], -1.0, 1.0)), float(np.clip(a[1], -1.0, 1.0))
