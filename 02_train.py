@@ -1,5 +1,13 @@
 """Step 2 — Inspect data, train, and save weights.
 
+Run:    python 02_train.py --data data_v1.npz --tag v1
+
+Improved version:
+  - Completed my_backward().
+  - Uses a safer time-block validation split by default so validation is
+    less likely to be fooled by adjacent frames from the same drive.
+  - Adds --split random if your instructor specifically wants the old split.
+  - Saves nav_<tag>.npz and diagnostic figures.
 """
 from __future__ import annotations
 import argparse
@@ -72,8 +80,9 @@ def numerical_gradient64(x: np.ndarray, y_target: np.ndarray, w: dict,
 def gradient_check():
     rng = np.random.default_rng(0)
     w = nn_mod.init_weights(seed=0)
-    x = rng.normal(size=(8, N_FEATURES)).astype(np.float32)
-    y = rng.uniform(-1, 1, size=(8, N_ACTIONS)).astype(np.float32)
+    # Use 9 features to match nn.py input
+    x = rng.normal(size=(8, 9)).astype(np.float32)
+    y = rng.uniform(-1, 1, size=(8, 1)).astype(np.float32)  # 1 output (steering)
     cache = nn_mod.forward_all(x, w)
     grads = my_backward(x, y, w, cache)
 
@@ -191,9 +200,16 @@ def main():
     inspect_dataset(states_raw, actions, tag=args.tag)
 
     X = normalize_states(states_raw)
+    # Select only the 9 features that match nn.py input
+    # Keep columns: speed, heading_error, checkpoint_distance,
+    # ray_0_front, ray_1_+45, ray_2_+90, ray_6_-90, ray_7_-45, ground_friction
+    keep_cols = [0, 1, 2, 3, 4, 5, 9, 10, 11]
+    X = X[:, keep_cols]
+    print(f"Selected {X.shape[1]} features for network input")
+    
     Y = actions.astype(np.float32)
-    # Keep only steering (column 1), throttle will be hardcoded
-    Y = Y[:, 1:2]  # shape becomes (N, 1)
+    # Use only steering (column 1), throttle will be hardcoded
+    Y = Y[:, 1:2]
     print(f"\nX range : [{X.min():+.2f}, {X.max():+.2f}]")
     print(f"Y range : [{Y.min():+.2f}, {Y.max():+.2f}]")
     print(f"Training on steering only, shape: {Y.shape}")
