@@ -73,6 +73,14 @@ def run_policy(client, policy_fn: Callable, duration: float = 60.0,
 
         # policy step
         throttle, steering = policy_fn(state)
+        
+        # Check for reset signal (99, 99) from policy
+        if throttle == 99.0 and steering == 99.0:
+            client.send_reset()  # Send R key reset
+            # Skip sending control this frame, just wait
+            time.sleep(interval)
+            continue
+            
         client.send_control_ws(throttle, steering)
         steps += 1
         if on_step is not None:
