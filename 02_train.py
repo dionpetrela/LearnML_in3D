@@ -192,8 +192,11 @@ def main():
 
     X = normalize_states(states_raw)
     Y = actions.astype(np.float32)
+    # Keep only steering (column 1), throttle will be hardcoded
+    Y = Y[:, 1:2]  # shape becomes (N, 1)
     print(f"\nX range : [{X.min():+.2f}, {X.max():+.2f}]")
     print(f"Y range : [{Y.min():+.2f}, {Y.max():+.2f}]")
+    print(f"Training on steering only, shape: {Y.shape}")
 
     gradient_check()
 

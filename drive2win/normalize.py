@@ -31,9 +31,9 @@ FEATURE_NAMES = [
     "ray_7_-45",
     "ground_friction",
 ]
-ACTION_NAMES = ["throttle", "steering"]
+ACTION_NAMES = ["steering"]
 N_FEATURES = 12
-N_ACTIONS = 2
+N_ACTIONS = 1
 
 
 def normalize_states(states_raw: np.ndarray) -> np.ndarray:
